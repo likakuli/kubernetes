@@ -285,6 +285,7 @@ func (r *Reflector) ListAndWatch(stopCh <-chan struct{}) error {
 			// It doesn't make sense to re-list all objects because most likely we will be able to restart
 			// watch where we ended.
 			// If that's the case wait and resend watch request.
+			// test
 			if urlError, ok := err.(*url.Error); ok {
 				if opError, ok := urlError.Err.(*net.OpError); ok {
 					if errno, ok := opError.Err.(syscall.Errno); ok && errno == syscall.ECONNREFUSED {
