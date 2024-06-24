@@ -589,6 +589,9 @@ type NodeInfo struct {
 	// Whenever NodeInfo changes, generation is bumped.
 	// This is used to avoid cloning it if the object didn't change.
 	Generation int64
+
+	// The time watched the node
+	AddedTime time.Time
 }
 
 // nextGeneration: Let's make sure history never forgets the name...
@@ -707,6 +710,7 @@ func NewNodeInfo(pods ...*v1.Pod) *NodeInfo {
 		UsedPorts:        make(HostPortInfo),
 		ImageStates:      make(map[string]*ImageStateSummary),
 		PVCRefCounts:     make(map[string]int),
+		AddedTime:        time.Now(),
 	}
 	for _, pod := range pods {
 		ni.AddPod(pod)
@@ -733,6 +737,7 @@ func (n *NodeInfo) Snapshot() *NodeInfo {
 		ImageStates:      make(map[string]*ImageStateSummary),
 		PVCRefCounts:     make(map[string]int),
 		Generation:       n.Generation,
+		AddedTime:        n.AddedTime,
 	}
 	if len(n.Pods) > 0 {
 		clone.Pods = append([]*PodInfo(nil), n.Pods...)

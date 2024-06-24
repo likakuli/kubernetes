@@ -37,16 +37,18 @@ import (
 	schedutil "k8s.io/kubernetes/pkg/scheduler/util"
 )
 
-func deepEqualWithoutGeneration(actual *nodeInfoListItem, expected *framework.NodeInfo) error {
+func deepEqualWithoutGenerationAndAddedTime(actual *nodeInfoListItem, expected *framework.NodeInfo) error {
 	if (actual == nil) != (expected == nil) {
 		return errors.New("one of the actual or expected is nil and the other is not")
 	}
 	// Ignore generation field.
 	if actual != nil {
 		actual.info.Generation = 0
+		actual.info.AddedTime = time.Time{}
 	}
 	if expected != nil {
 		expected.Generation = 0
+		expected.AddedTime = time.Time{}
 	}
 	if actual != nil {
 		if diff := cmp.Diff(expected, actual.info, cmp.AllowUnexported(framework.NodeInfo{})); diff != "" {
@@ -232,7 +234,7 @@ func TestAssumePodScheduled(t *testing.T) {
 				}
 			}
 			n := cache.nodes[nodeName]
-			if err := deepEqualWithoutGeneration(n, tc.wNodeInfo); err != nil {
+			if err := deepEqualWithoutGenerationAndAddedTime(n, tc.wNodeInfo); err != nil {
 				t.Error(err)
 			}
 
@@ -357,7 +359,7 @@ func TestExpirePod(t *testing.T) {
 			// expired and removed
 			cache.cleanupAssumedPods(logger, tc.cleanupTime)
 			n := cache.nodes[nodeName]
-			if err := deepEqualWithoutGeneration(n, tc.wNodeInfo); err != nil {
+			if err := deepEqualWithoutGenerationAndAddedTime(n, tc.wNodeInfo); err != nil {
 				t.Error(err)
 			}
 		})
@@ -419,7 +421,7 @@ func TestAddPodWillConfirm(t *testing.T) {
 	cache.cleanupAssumedPods(logger, now.Add(2*ttl))
 	// check after expiration. confirmed pods shouldn't be expired.
 	n := cache.nodes[nodeName]
-	if err := deepEqualWithoutGeneration(n, test.wNodeInfo); err != nil {
+	if err := deepEqualWithoutGenerationAndAddedTime(n, test.wNodeInfo); err != nil {
 		t.Error(err)
 	}
 }
@@ -525,7 +527,7 @@ func TestAddPodAlwaysUpdatesPodInfoInNodeInfo(t *testing.T) {
 	}
 	for nodeName, expected := range test.nodeInfo {
 		n := cache.nodes[nodeName]
-		if err := deepEqualWithoutGeneration(n, expected); err != nil {
+		if err := deepEqualWithoutGenerationAndAddedTime(n, expected); err != nil {
 			t.Errorf("node %q: %v", nodeName, err)
 		}
 	}
@@ -589,7 +591,7 @@ func TestAddPodWillReplaceAssumed(t *testing.T) {
 	}
 	for nodeName, expected := range test.wNodeInfo {
 		n := cache.nodes[nodeName]
-		if err := deepEqualWithoutGeneration(n, expected); err != nil {
+		if err := deepEqualWithoutGenerationAndAddedTime(n, expected); err != nil {
 			t.Errorf("node %q: %v", nodeName, err)
 		}
 	}
@@ -638,7 +640,7 @@ func TestAddPodAfterExpiration(t *testing.T) {
 	}
 	// check after expiration. confirmed pods shouldn't be expired.
 	n := cache.nodes[nodeName]
-	if err := deepEqualWithoutGeneration(n, test.wNodeInfo); err != nil {
+	if err := deepEqualWithoutGenerationAndAddedTime(n, test.wNodeInfo); err != nil {
 		t.Error(err)
 	}
 }
@@ -705,7 +707,7 @@ func TestUpdatePod(t *testing.T) {
 		}
 		// check after expiration. confirmed pods shouldn't be expired.
 		n := cache.nodes[nodeName]
-		if err := deepEqualWithoutGeneration(n, test.wNodeInfo[j-1]); err != nil {
+		if err := deepEqualWithoutGenerationAndAddedTime(n, test.wNodeInfo[j-1]); err != nil {
 			t.Errorf("update %d: %v", j, err)
 		}
 	}
@@ -857,7 +859,7 @@ func TestExpireAddUpdatePod(t *testing.T) {
 		}
 		// check after expiration. confirmed pods shouldn't be expired.
 		n := cache.nodes[nodeName]
-		if err := deepEqualWithoutGeneration(n, test.wNodeInfo[j-1]); err != nil {
+		if err := deepEqualWithoutGenerationAndAddedTime(n, test.wNodeInfo[j-1]); err != nil {
 			t.Errorf("update %d: %v", j, err)
 		}
 	}
@@ -900,7 +902,7 @@ func TestEphemeralStorageResource(t *testing.T) {
 		t.Fatalf("AddPod failed: %v", err)
 	}
 	n := cache.nodes[nodeName]
-	if err := deepEqualWithoutGeneration(n, test.wNodeInfo); err != nil {
+	if err := deepEqualWithoutGenerationAndAddedTime(n, test.wNodeInfo); err != nil {
 		t.Error(err)
 	}
 
@@ -961,7 +963,7 @@ func TestRemovePod(t *testing.T) {
 				}
 			}
 			n := cache.nodes[nodeName]
-			if err := deepEqualWithoutGeneration(n, wNodeInfo); err != nil {
+			if err := deepEqualWithoutGenerationAndAddedTime(n, wNodeInfo); err != nil {
 				t.Error(err)
 			}
 			for _, n := range nodes {
@@ -1242,6 +1244,7 @@ func TestNodeOperators(t *testing.T) {
 
 			// Generations are globally unique. We check in our unit tests that they are incremented correctly.
 			expected.Generation = got.info.Generation
+			expected.AddedTime = got.info.AddedTime
 			if diff := cmp.Diff(expected, got.info, cmp.AllowUnexported(framework.NodeInfo{})); diff != "" {
 				t.Errorf("Failed to add node into scheduler cache (-want,+got):\n%s", diff)
 			}
