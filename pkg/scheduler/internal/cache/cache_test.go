@@ -1965,6 +1965,22 @@ func TestSchedulerCache_updateNodeInfoSnapshotList(t *testing.T) {
 	}
 }
 
+func Benchmark5KNodesWithNodeAddAndDelete(b *testing.B) {
+	logger, _ := ktesting.NewTestContext(b)
+	cache := setupCacheOf5kNodes(b)
+	cachedNodes := NewEmptySnapshot()
+	cache.UpdateSnapshot(logger, cachedNodes)
+	node := st.MakeNode().Name("new-node-000").Obj()
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		cache.AddNode(logger, node)
+		cache.UpdateSnapshot(logger, cachedNodes)
+		cache.RemoveNode(logger, node)
+		cache.UpdateSnapshot(logger, cachedNodes)
+	}
+}
+
 func BenchmarkUpdate1kNodes30kPods(b *testing.B) {
 	logger, _ := ktesting.NewTestContext(b)
 	cache := setupCacheOf1kNodes30kPods(b)
@@ -2061,6 +2077,18 @@ func setupCacheOf1kNodes30kPods(b *testing.B) Cache {
 				b.Fatalf("AddPod failed: %v", err)
 			}
 		}
+	}
+	return cache
+}
+
+func setupCacheOf5kNodes(b *testing.B) Cache {
+	logger, ctx := ktesting.NewTestContext(b)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cache := newCache(ctx, time.Second, time.Second)
+	for i := 0; i < 5000; i++ {
+		nodeName := fmt.Sprintf("node-%d", i)
+		cache.AddNode(logger, st.MakeNode().Name(nodeName).Obj())
 	}
 	return cache
 }
