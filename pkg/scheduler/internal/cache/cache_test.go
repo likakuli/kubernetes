@@ -37,6 +37,10 @@ import (
 	schedutil "k8s.io/kubernetes/pkg/scheduler/util"
 )
 
+const (
+	ScalaInfo = "ScalaInfo"
+)
+
 func deepEqualWithoutGeneration(actual *nodeInfoListItem, expected *framework.NodeInfo) error {
 	if (actual == nil) != (expected == nil) {
 		return errors.New("one of the actual or expected is nil and the other is not")
@@ -87,13 +91,79 @@ func newNodeInfo(requestedResource *framework.Resource,
 	pods []*v1.Pod,
 	usedPorts framework.HostPortInfo,
 	imageStates map[string]*framework.ImageStateSummary,
+	scalaData map[string]interface{},
 ) *framework.NodeInfo {
 	nodeInfo := framework.NewNodeInfo(pods...)
 	nodeInfo.Requested = requestedResource
 	nodeInfo.NonZeroRequested = nonzeroRequest
 	nodeInfo.UsedPorts = usedPorts
 	nodeInfo.ImageStates = imageStates
+	nodeInfo.ScalaData = scalaData
 	return nodeInfo
+}
+
+type PodFirstContainerRequestInfo struct {
+	Requested int64
+}
+
+func newScalaData(requested int64) map[string]interface{} {
+	return map[string]interface{}{
+		ScalaInfo: &PodFirstContainerRequestInfo{
+			requested,
+		},
+	}
+}
+
+func newTransformerMap() TransformerMap {
+	transformerMap := make(TransformerMap)
+
+	transformerMap[framework.Pod] = []framework.Transformer{
+		framework.Transformer{
+			FilterFunc: func(obj interface{}) bool {
+				return len(obj.(*v1.Pod).Spec.Containers) > 0
+			},
+			NodeNameFn: func(obj interface{}) string {
+				return obj.(*v1.Pod).Spec.NodeName
+			},
+			UpdateHintFunc: func(oldObj, newObj interface{}) bool {
+				return oldObj.(*v1.Pod).Spec.Containers[0].Resources.Requests.Cpu().MilliValue() !=
+					newObj.(*v1.Pod).Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+			},
+			TransformFunc: func(logger klog.Logger, oldObj, newObj interface{}, ni *framework.NodeInfo) error {
+				if oldObj == nil && newObj != nil {
+					if info, ok := ni.ScalaData[ScalaInfo]; !ok {
+						ni.ScalaData[ScalaInfo] = &PodFirstContainerRequestInfo{
+							Requested: newObj.(*v1.Pod).Spec.Containers[0].Resources.Requests.Cpu().MilliValue(),
+						}
+					} else {
+						info.(*PodFirstContainerRequestInfo).Requested += newObj.(*v1.Pod).Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+					}
+				} else if oldObj != nil && newObj == nil {
+					if info, ok := ni.ScalaData[ScalaInfo]; !ok {
+						return fmt.Errorf("ScalaData is nil for %s", ScalaInfo)
+					} else {
+						info.(*PodFirstContainerRequestInfo).Requested -= oldObj.(*v1.Pod).Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+					}
+				} else {
+					if oldObj.(*v1.Pod).Spec.Containers[0].Resources.Requests.Cpu().MilliValue() ==
+						newObj.(*v1.Pod).Spec.Containers[0].Resources.Requests.Cpu().MilliValue() {
+						return fmt.Errorf("unexpected update event for there are already UpdateHintFunc registered")
+					} else {
+						if info, ok := ni.ScalaData[ScalaInfo]; !ok {
+							return fmt.Errorf("ScalaData is nil for %s", ScalaInfo)
+						} else {
+							info.(*PodFirstContainerRequestInfo).Requested -= oldObj.(*v1.Pod).Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+							info.(*PodFirstContainerRequestInfo).Requested -= newObj.(*v1.Pod).Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+						}
+					}
+				}
+
+				return nil
+			},
+		},
+	}
+
+	return transformerMap
 }
 
 // TestAssumePodScheduled tests that after a pod is assumed, its information is aggregated
@@ -130,6 +200,7 @@ func TestAssumePodScheduled(t *testing.T) {
 			[]*v1.Pod{testPods[0]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(100),
 		),
 	}, {
 		name: "node requested resource are equal to the sum of the assumed pods requested resource, node contains host ports defined by pods",
@@ -146,6 +217,7 @@ func TestAssumePodScheduled(t *testing.T) {
 			[]*v1.Pod{testPods[1], testPods[2]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).add("TCP", "127.0.0.1", 8080).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(300),
 		),
 	}, { // test non-zero request
 		name: "assumed pod without resource request",
@@ -162,6 +234,7 @@ func TestAssumePodScheduled(t *testing.T) {
 			[]*v1.Pod{testPods[3]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(0),
 		),
 	}, {
 		name: "assumed one pod with extended resource",
@@ -179,6 +252,7 @@ func TestAssumePodScheduled(t *testing.T) {
 			[]*v1.Pod{testPods[4]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(100),
 		),
 	}, {
 		name: "assumed two pods with extended resources",
@@ -196,6 +270,7 @@ func TestAssumePodScheduled(t *testing.T) {
 			[]*v1.Pod{testPods[4], testPods[5]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).add("TCP", "127.0.0.1", 8080).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(300),
 		),
 	}, {
 		name: "assumed pod with random invalid extended resource key",
@@ -212,6 +287,7 @@ func TestAssumePodScheduled(t *testing.T) {
 			[]*v1.Pod{testPods[6]},
 			newHostPortInfoBuilder().build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(100),
 		),
 	},
 	}
@@ -221,7 +297,7 @@ func TestAssumePodScheduled(t *testing.T) {
 			logger, ctx := ktesting.NewTestContext(t)
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			cache := newCache(ctx, time.Second, time.Second)
+			cache := newCache(ctx, newTransformerMap(), time.Second, time.Second)
 			for _, pod := range tc.pods {
 				if err := cache.AssumePod(logger, pod); err != nil {
 					t.Fatalf("AssumePod failed: %v", err)
@@ -309,6 +385,7 @@ func TestExpirePod(t *testing.T) {
 				[]*v1.Pod{testPods[2], testPods[1]},
 				newHostPortInfoBuilder().add("TCP", "127.0.0.1", 8080).build(),
 				make(map[string]*framework.ImageStateSummary),
+				newScalaData(400),
 			),
 			ttl: defaultTTL,
 		},
@@ -330,6 +407,7 @@ func TestExpirePod(t *testing.T) {
 				[]*v1.Pod{testPods[0]},
 				newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
 				make(map[string]*framework.ImageStateSummary),
+				newScalaData(100),
 			),
 			ttl: time.Duration(0),
 		},
@@ -340,7 +418,7 @@ func TestExpirePod(t *testing.T) {
 			logger, ctx := ktesting.NewTestContext(t)
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			cache := newCache(ctx, tc.ttl, time.Second)
+			cache := newCache(ctx, newTransformerMap(), tc.ttl, time.Second)
 
 			for _, pod := range tc.pods {
 				if err := cache.AssumePod(logger, pod.pod); err != nil {
@@ -395,13 +473,14 @@ func TestAddPodWillConfirm(t *testing.T) {
 			[]*v1.Pod{testPods[0]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(100),
 		),
 	}
 
 	logger, ctx := ktesting.NewTestContext(t)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cache := newCache(ctx, ttl, time.Second)
+	cache := newCache(ctx, newTransformerMap(), ttl, time.Second)
 	for _, podToAssume := range test.podsToAssume {
 		if err := assumeAndFinishBinding(logger, cache, podToAssume, now); err != nil {
 			t.Fatalf("assumePod failed: %v", err)
@@ -444,7 +523,7 @@ func TestDump(t *testing.T) {
 	logger, ctx := ktesting.NewTestContext(t)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cache := newCache(ctx, ttl, time.Second)
+	cache := newCache(ctx, newTransformerMap(), ttl, time.Second)
 	for _, podToAssume := range test.podsToAssume {
 		if err := assumeAndFinishBinding(logger, cache, podToAssume, now); err != nil {
 			t.Errorf("assumePod failed: %v", err)
@@ -508,11 +587,12 @@ func TestAddPodAlwaysUpdatesPodInfoInNodeInfo(t *testing.T) {
 				[]*v1.Pod{p2},
 				newHostPortInfoBuilder().add("TCP", "0.0.0.0", 80).build(),
 				make(map[string]*framework.ImageStateSummary),
+				newScalaData(100),
 			),
 		},
 	}
 
-	cache := newCache(ctx, ttl, time.Second)
+	cache := newCache(ctx, newTransformerMap(), ttl, time.Second)
 	for _, podToAssume := range test.podsToAssume {
 		if err := assumeAndFinishBinding(logger, cache, podToAssume, now); err != nil {
 			t.Fatalf("assumePod failed: %v", err)
@@ -564,6 +644,7 @@ func TestAddPodWillReplaceAssumed(t *testing.T) {
 				[]*v1.Pod{updatedPod.DeepCopy()},
 				newHostPortInfoBuilder().add("TCP", "0.0.0.0", 90).build(),
 				make(map[string]*framework.ImageStateSummary),
+				newScalaData(200),
 			),
 		},
 	}
@@ -571,7 +652,7 @@ func TestAddPodWillReplaceAssumed(t *testing.T) {
 	logger, ctx := ktesting.NewTestContext(t)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cache := newCache(ctx, ttl, time.Second)
+	cache := newCache(ctx, newTransformerMap(), ttl, time.Second)
 	for _, podToAssume := range test.podsToAssume {
 		if err := assumeAndFinishBinding(logger, cache, podToAssume, now); err != nil {
 			t.Fatalf("assumePod failed: %v", err)
@@ -617,6 +698,7 @@ func TestAddPodAfterExpiration(t *testing.T) {
 			[]*v1.Pod{basePod},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(100),
 		),
 	}
 
@@ -624,7 +706,7 @@ func TestAddPodAfterExpiration(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	now := time.Now()
-	cache := newCache(ctx, ttl, time.Second)
+	cache := newCache(ctx, newTransformerMap(), ttl, time.Second)
 	if err := assumeAndFinishBinding(logger, cache, test.pod, now); err != nil {
 		t.Fatalf("assumePod failed: %v", err)
 	}
@@ -671,6 +753,7 @@ func TestUpdatePod(t *testing.T) {
 			[]*v1.Pod{testPods[1]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 8080).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(200),
 		), newNodeInfo(
 			&framework.Resource{
 				MilliCPU: 100,
@@ -683,13 +766,14 @@ func TestUpdatePod(t *testing.T) {
 			[]*v1.Pod{testPods[0]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(100),
 		)},
 	}
 
 	logger, ctx := ktesting.NewTestContext(t)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cache := newCache(ctx, ttl, time.Second)
+	cache := newCache(ctx, newTransformerMap(), ttl, time.Second)
 	for _, podToAdd := range test.podsToAdd {
 		if err := cache.AddPod(logger, podToAdd); err != nil {
 			t.Fatalf("AddPod failed: %v", err)
@@ -751,7 +835,7 @@ func TestUpdatePodAndGet(t *testing.T) {
 			logger, ctx := ktesting.NewTestContext(t)
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			cache := newCache(ctx, ttl, time.Second)
+			cache := newCache(ctx, newTransformerMap(), ttl, time.Second)
 			// trying to get an unknown pod should return an error
 			// podToUpdate has not been added yet
 			if _, err := cache.GetPod(tc.podToUpdate); err == nil {
@@ -815,6 +899,7 @@ func TestExpireAddUpdatePod(t *testing.T) {
 			[]*v1.Pod{testPods[1]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 8080).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(200),
 		), newNodeInfo(
 			&framework.Resource{
 				MilliCPU: 100,
@@ -827,6 +912,7 @@ func TestExpireAddUpdatePod(t *testing.T) {
 			[]*v1.Pod{testPods[0]},
 			newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(100),
 		)},
 	}
 
@@ -834,7 +920,7 @@ func TestExpireAddUpdatePod(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	now := time.Now()
-	cache := newCache(ctx, ttl, time.Second)
+	cache := newCache(ctx, newTransformerMap(), ttl, time.Second)
 	for _, podToAssume := range test.podsToAssume {
 		if err := assumeAndFinishBinding(logger, cache, podToAssume, now); err != nil {
 			t.Fatalf("assumePod failed: %v", err)
@@ -890,12 +976,13 @@ func TestEphemeralStorageResource(t *testing.T) {
 			[]*v1.Pod{podE},
 			framework.HostPortInfo{},
 			make(map[string]*framework.ImageStateSummary),
+			newScalaData(0),
 		),
 	}
 	logger, ctx := ktesting.NewTestContext(t)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cache := newCache(ctx, time.Second, time.Second)
+	cache := newCache(ctx, newTransformerMap(), time.Second, time.Second)
 	if err := cache.AddPod(logger, test.pod); err != nil {
 		t.Fatalf("AddPod failed: %v", err)
 	}
@@ -935,6 +1022,7 @@ func TestRemovePod(t *testing.T) {
 		[]*v1.Pod{pod},
 		newHostPortInfoBuilder().add("TCP", "127.0.0.1", 80).build(),
 		make(map[string]*framework.ImageStateSummary),
+		newScalaData(100),
 	)
 	tests := map[string]struct {
 		assume bool
@@ -949,7 +1037,7 @@ func TestRemovePod(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			nodeName := pod.Spec.NodeName
-			cache := newCache(ctx, time.Second, time.Second)
+			cache := newCache(ctx, newTransformerMap(), time.Second, time.Second)
 			// Add/Assume pod succeeds even before adding the nodes.
 			if tt.assume {
 				if err := cache.AddPod(logger, pod); err != nil {
@@ -999,7 +1087,7 @@ func TestForgetPod(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cache := newCache(ctx, ttl, time.Second)
+	cache := newCache(ctx, newTransformerMap(), ttl, time.Second)
 	for _, pod := range pods {
 		if err := assumeAndFinishBinding(logger, cache, pod, now); err != nil {
 			t.Fatalf("assumePod failed: %v", err)
@@ -1037,10 +1125,11 @@ func TestForgetPod(t *testing.T) {
 }
 
 // buildNodeInfo creates a NodeInfo by simulating node operations in cache.
-func buildNodeInfo(node *v1.Node, pods []*v1.Pod, imageStates map[string]*framework.ImageStateSummary) *framework.NodeInfo {
+func buildNodeInfo(node *v1.Node, pods []*v1.Pod, imageStates map[string]*framework.ImageStateSummary, scalaData map[string]interface{}) *framework.NodeInfo {
 	expected := framework.NewNodeInfo()
 	expected.SetNode(node)
 	expected.Allocatable = framework.NewResource(node.Status.Allocatable)
+	expected.ScalaData = scalaData
 	expected.Generation++
 	for _, pod := range pods {
 		expected.AddPod(pod)
@@ -1111,9 +1200,10 @@ func TestNodeOperators(t *testing.T) {
 		"gcr.io/900:latest": 900 * mb,
 	}
 	tests := []struct {
-		name  string
-		nodes []*v1.Node
-		pods  []*v1.Pod
+		name      string
+		nodes     []*v1.Node
+		pods      []*v1.Pod
+		scalaData map[string]interface{}
 	}{
 		{
 			name: "operate the node with one pod",
@@ -1151,6 +1241,7 @@ func TestNodeOperators(t *testing.T) {
 					},
 				},
 			},
+			scalaData: newScalaData(500),
 		},
 		{
 			name: "operate the node with two pods",
@@ -1199,6 +1290,7 @@ func TestNodeOperators(t *testing.T) {
 					},
 				},
 			},
+			scalaData: newScalaData(1000),
 		},
 	}
 
@@ -1210,9 +1302,9 @@ func TestNodeOperators(t *testing.T) {
 			node := tc.nodes[0]
 
 			imageStates := buildImageStates(tc.nodes)
-			expected := buildNodeInfo(node, tc.pods, imageStates)
+			expected := buildNodeInfo(node, tc.pods, imageStates, tc.scalaData)
 
-			cache := newCache(ctx, time.Second, time.Second)
+			cache := newCache(ctx, newTransformerMap(), time.Second, time.Second)
 			for _, nodeItem := range tc.nodes {
 				cache.AddNode(logger, nodeItem)
 			}
@@ -1706,7 +1798,7 @@ func TestSchedulerCache_UpdateSnapshot(t *testing.T) {
 			_, ctx := ktesting.NewTestContext(t)
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			cache = newCache(ctx, time.Second, time.Second)
+			cache = newCache(ctx, newTransformerMap(), time.Second, time.Second)
 			snapshot = NewEmptySnapshot()
 
 			for _, op := range test.operations {
@@ -1941,7 +2033,7 @@ func TestSchedulerCache_updateNodeInfoSnapshotList(t *testing.T) {
 			_, ctx := ktesting.NewTestContext(t)
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			cache = newCache(ctx, time.Second, time.Second)
+			cache = newCache(ctx, newTransformerMap(), time.Second, time.Second)
 			snapshot = NewEmptySnapshot()
 
 			test.operations(t)
@@ -2047,7 +2139,7 @@ func setupCacheOf1kNodes30kPods(b *testing.B) Cache {
 	logger, ctx := ktesting.NewTestContext(b)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cache := newCache(ctx, time.Second, time.Second)
+	cache := newCache(ctx, newTransformerMap(), time.Second, time.Second)
 	for i := 0; i < 1000; i++ {
 		nodeName := fmt.Sprintf("node-%d", i)
 		cache.AddNode(logger, st.MakeNode().Name(nodeName).Obj())
@@ -2068,7 +2160,7 @@ func setupCacheWithAssumedPods(b *testing.B, podNum int, assumedTime time.Time) 
 	ctx, cancel := context.WithCancel(ctx)
 	addedNodes := make(map[string]struct{})
 	defer cancel()
-	cache := newCache(ctx, time.Second, time.Second)
+	cache := newCache(ctx, newTransformerMap(), time.Second, time.Second)
 	for i := 0; i < podNum; i++ {
 		nodeName := fmt.Sprintf("node-%d", i/10)
 		if _, ok := addedNodes[nodeName]; !ok {

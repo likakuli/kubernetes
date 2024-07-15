@@ -333,6 +333,13 @@ type Plugin interface {
 	Name() string
 }
 
+// TransformExtensions todo
+type TransformExtensions interface {
+	Plugin
+	// TransformersToRegister todo
+	TransformersToRegister() map[GVK]Transformer
+}
+
 // PreEnqueuePlugin is an interface that must be implemented by "PreEnqueue" plugins.
 // These plugins are called prior to adding Pods to activeQ.
 // Note: an preEnqueue plugin is expected to be lightweight and efficient, so it's not expected to
@@ -573,6 +580,9 @@ type BindPlugin interface {
 // Configured plugins are called at specified points in a scheduling context.
 type Framework interface {
 	Handle
+
+	// TransformExtensions returns the registered Transform extensions.
+	TransformExtensions() []TransformExtensions
 
 	// PreEnqueuePlugins returns the registered preEnqueue plugins.
 	PreEnqueuePlugins() []PreEnqueuePlugin

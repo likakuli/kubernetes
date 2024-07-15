@@ -18,6 +18,7 @@ package cache
 
 import (
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
@@ -104,6 +105,12 @@ type Cache interface {
 
 	// RemoveNode removes overall information about node.
 	RemoveNode(logger klog.Logger, node *v1.Node) error
+
+	AddCR(logger klog.Logger, obj *unstructured.Unstructured) error
+
+	UpdateCR(logger klog.Logger, oldObj, newObj *unstructured.Unstructured) error
+
+	RemoveCR(logger klog.Logger, obj *unstructured.Unstructured) error
 
 	// UpdateSnapshot updates the passed infoSnapshot to the current contents of Cache.
 	// The node info contains aggregated information of pods scheduled (including assumed to be)

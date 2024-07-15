@@ -265,6 +265,7 @@ func TestNewNodeInfo(t *testing.T) {
 		},
 		ImageStates:  map[string]*ImageStateSummary{},
 		PVCRefCounts: map[string]int{},
+		ScalaData:    map[string]interface{}{},
 		Pods: []*PodInfo{
 			{
 				Pod: &v1.Pod{
@@ -358,6 +359,7 @@ func TestNodeInfoClone(t *testing.T) {
 				},
 				ImageStates:  map[string]*ImageStateSummary{},
 				PVCRefCounts: map[string]int{},
+				ScalaData:    map[string]interface{}{},
 				Pods: []*PodInfo{
 					{
 						Pod: &v1.Pod{
@@ -432,6 +434,7 @@ func TestNodeInfoClone(t *testing.T) {
 				},
 				ImageStates:  map[string]*ImageStateSummary{},
 				PVCRefCounts: map[string]int{},
+				ScalaData:    map[string]interface{}{},
 				Pods: []*PodInfo{
 					{
 						Pod: &v1.Pod{
@@ -670,6 +673,7 @@ func TestNodeInfoAddPod(t *testing.T) {
 		},
 		ImageStates:  map[string]*ImageStateSummary{},
 		PVCRefCounts: map[string]int{"node_info_cache_test/pvc-1": 2, "node_info_cache_test/pvc-2": 1},
+		ScalaData:    map[string]interface{}{},
 		Pods: []*PodInfo{
 			{
 				Pod: &v1.Pod{
@@ -896,6 +900,7 @@ func TestNodeInfoRemovePod(t *testing.T) {
 				},
 				ImageStates:  map[string]*ImageStateSummary{},
 				PVCRefCounts: map[string]int{"node_info_cache_test/pvc-1": 1},
+				ScalaData:    map[string]interface{}{},
 				Pods: []*PodInfo{
 					{
 						Pod: &v1.Pod{
@@ -1046,6 +1051,7 @@ func TestNodeInfoRemovePod(t *testing.T) {
 				},
 				ImageStates:  map[string]*ImageStateSummary{},
 				PVCRefCounts: map[string]int{},
+				ScalaData:    map[string]interface{}{},
 				Pods: []*PodInfo{
 					{
 						Pod: &v1.Pod{

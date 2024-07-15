@@ -324,9 +324,15 @@ func New(ctx context.Context,
 
 	preEnqueuePluginMap := make(map[string][]framework.PreEnqueuePlugin)
 	queueingHintsPerProfile := make(internalqueue.QueueingHintMapPerProfile)
+	transformExtensionPluginMap := make(map[string]framework.TransformExtensions)
 	for profileName, profile := range profiles {
 		preEnqueuePluginMap[profileName] = profile.PreEnqueuePlugins()
 		queueingHintsPerProfile[profileName] = buildQueueingHintMap(profile.EnqueueExtensions())
+		for _, es := range profile.TransformExtensions() {
+			if _, ok := transformExtensionPluginMap[es.Name()]; !ok {
+				transformExtensionPluginMap[es.Name()] = es
+			}
+		}
 	}
 
 	podQueue := internalqueue.NewSchedulingQueue(
@@ -346,7 +352,8 @@ func New(ctx context.Context,
 		fwk.SetPodNominator(podQueue)
 	}
 
-	schedulerCache := internalcache.New(ctx, durationToExpireAssumedPod)
+	transformerMap := buildTransformerMap(transformExtensionPluginMap)
+	schedulerCache := internalcache.New(ctx, transformerMap, durationToExpireAssumedPod)
 
 	// Setup cache debugger.
 	debugger := cachedebugger.New(nodeLister, podLister, schedulerCache, podQueue)
@@ -366,7 +373,8 @@ func New(ctx context.Context,
 	sched.NextPod = podQueue.Pop
 	sched.applyDefaultHandlers()
 
-	if err = addAllEventHandlers(sched, informerFactory, dynInformerFactory, resourceClaimCache, unionedGVKs(queueingHintsPerProfile)); err != nil {
+	if err = addAllEventHandlers(sched, informerFactory, dynInformerFactory, resourceClaimCache,
+		unionedGVKs(queueingHintsPerProfile), transformerMap); err != nil {
 		return nil, fmt.Errorf("adding event handlers: %w", err)
 	}
 
@@ -439,6 +447,20 @@ func buildQueueingHintMap(es []framework.EnqueueExtensions) internalqueue.Queuei
 		}
 	}
 	return queueingHintMap
+}
+
+func buildTransformerMap(es map[string]framework.TransformExtensions) internalcache.TransformerMap {
+	transformerMap := make(internalcache.TransformerMap)
+
+	for _, e := range es {
+		transformers := e.TransformersToRegister()
+
+		for gvk, transformer := range transformers {
+			transformerMap[gvk] = append(transformerMap[gvk], transformer)
+		}
+	}
+
+	return transformerMap
 }
 
 // Run begins watching and scheduling. It starts scheduling and blocked until the context is done.

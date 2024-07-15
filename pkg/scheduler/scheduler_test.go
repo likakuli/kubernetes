@@ -284,7 +284,7 @@ func TestFailureHandler(t *testing.T) {
 			podInformer.Informer().GetStore().Add(testPod)
 
 			queue := internalqueue.NewPriorityQueue(nil, informerFactory, internalqueue.WithClock(testingclock.NewFakeClock(time.Now())))
-			schedulerCache := internalcache.New(ctx, 30*time.Second)
+			schedulerCache := internalcache.New(ctx, nil, 30*time.Second)
 
 			if err := queue.Add(logger, testPod); err != nil {
 				t.Fatalf("Add failed: %v", err)
@@ -344,7 +344,7 @@ func TestFailureHandler_PodAlreadyBound(t *testing.T) {
 	podInformer.Informer().GetStore().Add(testPod)
 
 	queue := internalqueue.NewPriorityQueue(nil, informerFactory, internalqueue.WithClock(testingclock.NewFakeClock(time.Now())))
-	schedulerCache := internalcache.New(ctx, 30*time.Second)
+	schedulerCache := internalcache.New(ctx, nil, 30*time.Second)
 
 	// Add node to schedulerCache no matter it's deleted in API server or not.
 	schedulerCache.AddNode(logger, &nodeFoo)

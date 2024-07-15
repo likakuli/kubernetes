@@ -690,6 +690,10 @@ const (
 	// which benefits to reduce the useless requeueing.
 	SchedulerQueueingHints featuregate.Feature = "SchedulerQueueingHints"
 
+	// owner: @likakuli
+	// Enable the scheduler's enhancement called CacheTransform
+	SchedulerCacheTransform featuregate.Feature = "SchedulerCacheTransform"
+
 	// owner: @atosatto @yuanchen8911
 	// kep: http://kep.k8s.io/3902
 	// beta: v1.29
@@ -1147,6 +1151,8 @@ var defaultKubernetesFeatureGates = map[featuregate.Feature]featuregate.FeatureS
 	ElasticIndexedJob: {Default: true, PreRelease: featuregate.Beta},
 
 	SchedulerQueueingHints: {Default: false, PreRelease: featuregate.Beta},
+
+	SchedulerCacheTransform: {Default: true, PreRelease: featuregate.Alpha},
 
 	SeparateTaintEvictionController: {Default: true, PreRelease: featuregate.Beta},
 

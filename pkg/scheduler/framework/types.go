@@ -586,6 +586,9 @@ type NodeInfo struct {
 	// Keys are in the format "namespace/name".
 	PVCRefCounts map[string]int
 
+	// ScalaData
+	ScalaData map[string]interface{}
+
 	// Whenever NodeInfo changes, generation is bumped.
 	// This is used to avoid cloning it if the object didn't change.
 	Generation int64
@@ -722,6 +725,7 @@ func NewNodeInfo(pods ...*v1.Pod) *NodeInfo {
 		UsedPorts:        make(HostPortInfo),
 		ImageStates:      make(map[string]*ImageStateSummary),
 		PVCRefCounts:     make(map[string]int),
+		ScalaData:        make(map[string]interface{}),
 	}
 	for _, pod := range pods {
 		ni.AddPod(pod)
@@ -747,6 +751,7 @@ func (n *NodeInfo) Snapshot() *NodeInfo {
 		UsedPorts:        make(HostPortInfo),
 		ImageStates:      make(map[string]*ImageStateSummary),
 		PVCRefCounts:     make(map[string]int),
+		ScalaData:        make(map[string]interface{}),
 		Generation:       n.Generation,
 	}
 	if len(n.Pods) > 0 {
@@ -777,6 +782,9 @@ func (n *NodeInfo) Snapshot() *NodeInfo {
 	}
 	for key, value := range n.PVCRefCounts {
 		clone.PVCRefCounts[key] = value
+	}
+	for key, value := range n.ScalaData {
+		clone.ScalaData[key] = value
 	}
 	return clone
 }
@@ -1098,4 +1106,26 @@ func (h HostPortInfo) sanitize(ip, protocol *string) {
 	if len(*protocol) == 0 {
 		*protocol = string(v1.ProtocolTCP)
 	}
+}
+
+// TransformFn defines transform method for specified cr
+type TransformFn func(logger klog.Logger, oldObj, newObj interface{}, ni *NodeInfo) error
+type NodeNameFn func(obj interface{}) string
+type FilterFunc func(obj interface{}) bool
+type UpdateHintFunc func(oldObj, newObj interface{}) bool
+
+type Transformer struct {
+	// NodeNameFn must not be nil when TransformFunc is not nil
+	NodeNameFn NodeNameFn
+	// optional
+	// to build FilteringResourceEventHandler
+	FilterFunc FilterFunc
+	// optional
+	// to reduce unnecessary update event
+	UpdateHintFunc UpdateHintFunc
+	// TransformFunc defines the transform function for specified cr and NodeInfo
+	// if oldObj is nil and newObj is not nil, then it's Add event
+	// else if oldObj is not nil and newObj is nil then it's Delete event
+	// else it's Update event
+	TransformFunc TransformFn
 }

@@ -18,6 +18,7 @@ package fake
 
 import (
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	internalcache "k8s.io/kubernetes/pkg/scheduler/internal/cache"
@@ -54,6 +55,18 @@ func (c *Cache) UpdatePod(logger klog.Logger, oldPod, newPod *v1.Pod) error { re
 
 // RemovePod is a fake method for testing.
 func (c *Cache) RemovePod(logger klog.Logger, pod *v1.Pod) error { return nil }
+
+func (c *Cache) AddCR(logger klog.Logger, cr *unstructured.Unstructured) error {
+	return nil
+}
+
+func (c *Cache) UpdateCR(logger klog.Logger, oldCR, newCR *unstructured.Unstructured) error {
+	return nil
+}
+
+func (c *Cache) RemoveCR(logger klog.Logger, cr *unstructured.Unstructured) error {
+	return nil
+}
 
 // IsAssumedPod is a fake method for testing.
 func (c *Cache) IsAssumedPod(pod *v1.Pod) (bool, error) {

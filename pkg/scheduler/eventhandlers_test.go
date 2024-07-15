@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/ktesting"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -230,7 +231,7 @@ func TestUpdatePodInCache(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			sched := &Scheduler{
-				Cache:           cache.New(ctx, ttl),
+				Cache:           cache.New(ctx, nil, ttl),
 				SchedulingQueue: queue.NewTestQueue(ctx, nil),
 				logger:          logger,
 			}
@@ -367,6 +368,7 @@ func TestAddAllEventHandlers(t *testing.T) {
 	tests := []struct {
 		name                   string
 		gvkMap                 map[framework.GVK]framework.ActionType
+		transformerMap         cache.TransformerMap
 		enableDRA              bool
 		expectStaticInformers  map[reflect.Type]bool
 		expectDynamicInformers map[schema.GroupVersionResource]bool
@@ -466,6 +468,26 @@ func TestAddAllEventHandlers(t *testing.T) {
 				{Group: "apps", Version: "v1", Resource: "daemonsets"}: true,
 			},
 		},
+		{
+			name: "add transformer GVKs handlers defined in plugins dynamically",
+			transformerMap: map[framework.GVK][]framework.Transformer{
+				"daemonsets.v1.apps": []framework.Transformer{
+					emptyTransformer(),
+				},
+				"cronjobs.v1.batch": []framework.Transformer{
+					emptyTransformer(),
+				},
+			},
+			expectStaticInformers: map[reflect.Type]bool{
+				reflect.TypeOf(&v1.Pod{}):       true,
+				reflect.TypeOf(&v1.Node{}):      true,
+				reflect.TypeOf(&v1.Namespace{}): true,
+			},
+			expectDynamicInformers: map[schema.GroupVersionResource]bool{
+				{Group: "apps", Version: "v1", Resource: "daemonsets"}: true,
+				{Group: "batch", Version: "v1", Resource: "cronjobs"}:  true,
+			},
+		},
 	}
 
 	scheme := runtime.NewScheme()
@@ -498,7 +520,7 @@ func TestAddAllEventHandlers(t *testing.T) {
 				resourceClaimCache = assumecache.NewAssumeCache(logger, resourceClaimInformer, "ResourceClaim", "", nil)
 			}
 
-			if err := addAllEventHandlers(&testSched, informerFactory, dynInformerFactory, resourceClaimCache, tt.gvkMap); err != nil {
+			if err := addAllEventHandlers(&testSched, informerFactory, dynInformerFactory, resourceClaimCache, tt.gvkMap, tt.transformerMap); err != nil {
 				t.Fatalf("Add event handlers failed, error = %v", err)
 			}
 
@@ -514,6 +536,17 @@ func TestAddAllEventHandlers(t *testing.T) {
 				t.Errorf("Unexpected diff (-want, +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func emptyTransformer() framework.Transformer {
+	return framework.Transformer{
+		NodeNameFn: func(obj interface{}) string {
+			return ""
+		},
+		TransformFunc: func(logger klog.Logger, oldObj, newObj interface{}, ni *framework.NodeInfo) error {
+			return nil
+		},
 	}
 }
 

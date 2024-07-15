@@ -55,6 +55,7 @@ type frameworkImpl struct {
 	snapshotSharedLister framework.SharedLister
 	waitingPods          *waitingPodsMap
 	scorePluginWeight    map[string]int
+	transformExtensions  []framework.TransformExtensions
 	preEnqueuePlugins    []framework.PreEnqueuePlugin
 	enqueueExtensions    []framework.EnqueueExtensions
 	queueSortPlugins     []framework.QueueSortPlugin
@@ -341,6 +342,9 @@ func NewFramework(ctx context.Context, r Registry, profile *config.KubeScheduler
 		}
 		f.pluginsMap[name] = p
 
+		if err = f.fillTransformExtensions(p); err != nil {
+			return nil, err
+		}
 		f.fillEnqueueExtensions(p)
 	}
 
@@ -605,6 +609,20 @@ func shouldHaveEnqueueExtensions(p framework.Plugin) bool {
 	return false
 }
 
+func (f *frameworkImpl) fillTransformExtensions(p framework.Plugin) error {
+	ext, ok := p.(framework.TransformExtensions)
+	if ok {
+		for _, transformer := range ext.TransformersToRegister() {
+			if transformer.NodeNameFn == nil && transformer.TransformFunc != nil {
+				return fmt.Errorf("initializing plugin %q: NodeNameFn must not be nil when TransformFunc is not nil", ext.Name())
+			}
+		}
+		f.transformExtensions = append(f.transformExtensions, ext)
+	}
+
+	return nil
+}
+
 func (f *frameworkImpl) fillEnqueueExtensions(p framework.Plugin) {
 	if !shouldHaveEnqueueExtensions(p) {
 		// Ignore EnqueueExtensions from plugin which isn't PreEnqueue, PreFilter, Filter, Reserve, and Permit.
@@ -661,6 +679,10 @@ func updatePluginList(pluginList interface{}, pluginSet config.PluginSet, plugin
 		plugins.Set(newPlugins)
 	}
 	return nil
+}
+
+func (f *frameworkImpl) TransformExtensions() []framework.TransformExtensions {
+	return f.transformExtensions
 }
 
 // PreEnqueuePlugins returns the registered preEnqueue plugins.

@@ -23,9 +23,12 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 )
@@ -38,9 +41,9 @@ var (
 // It automatically starts a go routine that manages expiration of assumed pods.
 // "ttl" is how long the assumed pod will get expired.
 // "ctx" is the context that would close the background goroutine.
-func New(ctx context.Context, ttl time.Duration) Cache {
+func New(ctx context.Context, transformers TransformerMap, ttl time.Duration) Cache {
 	logger := klog.FromContext(ctx)
-	cache := newCache(ctx, ttl, cleanAssumedPeriod)
+	cache := newCache(ctx, transformers, ttl, cleanAssumedPeriod)
 	cache.run(logger)
 	return cache
 }
@@ -73,6 +76,8 @@ type cacheImpl struct {
 	nodeTree *nodeTree
 	// A map from image name to its ImageStateSummary.
 	imageStates map[string]*framework.ImageStateSummary
+	// A map from plugin name to its ActionTransformInfo
+	transformers TransformerMap
 }
 
 type podState struct {
@@ -84,18 +89,21 @@ type podState struct {
 	bindingFinished bool
 }
 
-func newCache(ctx context.Context, ttl, period time.Duration) *cacheImpl {
+type TransformerMap map[framework.GVK][]framework.Transformer
+
+func newCache(ctx context.Context, transformers TransformerMap, ttl, period time.Duration) *cacheImpl {
 	logger := klog.FromContext(ctx)
 	return &cacheImpl{
 		ttl:    ttl,
 		period: period,
 		stop:   ctx.Done(),
 
-		nodes:       make(map[string]*nodeInfoListItem),
-		nodeTree:    newNodeTree(logger, nil),
-		assumedPods: sets.New[string](),
-		podStates:   make(map[string]*podState),
-		imageStates: make(map[string]*framework.ImageStateSummary),
+		nodes:        make(map[string]*nodeInfoListItem),
+		nodeTree:     newNodeTree(logger, nil),
+		assumedPods:  sets.New[string](),
+		podStates:    make(map[string]*podState),
+		imageStates:  make(map[string]*framework.ImageStateSummary),
+		transformers: transformers,
 	}
 }
 
@@ -433,6 +441,16 @@ func (cache *cacheImpl) addPod(logger klog.Logger, pod *v1.Pod, assumePod bool) 
 		cache.nodes[pod.Spec.NodeName] = n
 	}
 	n.info.AddPod(pod)
+	if feature.DefaultFeatureGate.Enabled(features.SchedulerCacheTransform) && len(cache.transformers) > 0 {
+		for _, transformer := range cache.transformers[framework.Pod] {
+			if transformer.FilterFunc != nil && transformer.FilterFunc(pod) {
+				err := transformer.TransformFunc(logger, nil, pod, n.info)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
 	cache.moveNodeInfoToHead(logger, pod.Spec.NodeName)
 	ps := &podState{
 		pod: pod,
@@ -469,6 +487,16 @@ func (cache *cacheImpl) removePod(logger klog.Logger, pod *v1.Pod) error {
 		if err := n.info.RemovePod(logger, pod); err != nil {
 			return err
 		}
+		if feature.DefaultFeatureGate.Enabled(features.SchedulerCacheTransform) && len(cache.transformers) > 0 {
+			for _, transformer := range cache.transformers[framework.Pod] {
+				if transformer.FilterFunc != nil && transformer.FilterFunc(pod) {
+					err := transformer.TransformFunc(logger, pod, nil, n.info)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
 		if len(n.info.Pods) == 0 && n.info.Node() == nil {
 			cache.removeNodeInfoFromList(logger, pod.Spec.NodeName)
 		} else {
@@ -478,6 +506,87 @@ func (cache *cacheImpl) removePod(logger klog.Logger, pod *v1.Pod) error {
 
 	delete(cache.podStates, key)
 	delete(cache.assumedPods, key)
+	return nil
+}
+
+func (cache *cacheImpl) AddCR(logger klog.Logger, obj *unstructured.Unstructured) error {
+	for _, transformer := range cache.transformers[framework.GVK(obj.GetObjectKind().GroupVersionKind().String())] {
+		nodeName := transformer.NodeNameFn(obj)
+		n, ok := cache.nodes[nodeName]
+		if !ok {
+			n = newNodeInfoListItem(framework.NewNodeInfo())
+			cache.nodes[nodeName] = n
+		}
+		err := transformer.TransformFunc(logger, nil, obj, n.info)
+		if err != nil {
+			return err
+		}
+		cache.moveNodeInfoToHead(logger, nodeName)
+	}
+
+	return nil
+}
+
+func (cache *cacheImpl) UpdateCR(logger klog.Logger, oldObj, newObj *unstructured.Unstructured) error {
+	for _, transformer := range cache.transformers[framework.GVK(newObj.GetObjectKind().GroupVersionKind().String())] {
+		if transformer.UpdateHintFunc == nil || transformer.UpdateHintFunc != nil && transformer.UpdateHintFunc(oldObj, newObj) {
+			newNodeName := transformer.NodeNameFn(newObj)
+			oldNodeName := transformer.NodeNameFn(oldObj)
+			if oldNodeName == newNodeName {
+				n, ok := cache.nodes[newNodeName]
+				if !ok {
+					logger.Error(nil, "Node not found when trying to update cr", "node", newNodeName, "cr", klog.KObj(newObj))
+				} else {
+					err := transformer.TransformFunc(logger, oldObj, newObj, n.info)
+					if err != nil {
+						return err
+					}
+					cache.moveNodeInfoToHead(logger, newNodeName)
+				}
+			} else {
+				n, ok := cache.nodes[oldNodeName]
+				if !ok {
+					logger.Error(nil, "Node not found when trying to update cr", "node", oldNodeName, "cr", klog.KObj(oldObj))
+				} else {
+					err := transformer.TransformFunc(logger, oldObj, nil, n.info)
+					if err != nil {
+						return err
+					}
+					cache.moveNodeInfoToHead(logger, oldNodeName)
+				}
+
+				n, ok = cache.nodes[newNodeName]
+				if !ok {
+					n = newNodeInfoListItem(framework.NewNodeInfo())
+					cache.nodes[newNodeName] = n
+				}
+				err := transformer.TransformFunc(logger, nil, newObj, n.info)
+				if err != nil {
+					return err
+				}
+				cache.moveNodeInfoToHead(logger, newNodeName)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (cache *cacheImpl) RemoveCR(logger klog.Logger, obj *unstructured.Unstructured) error {
+	for _, transformer := range cache.transformers[framework.GVK(obj.GetObjectKind().GroupVersionKind().String())] {
+		nodeName := transformer.NodeNameFn(obj)
+		n, ok := cache.nodes[nodeName]
+		if !ok {
+			logger.Error(nil, "Node not found when trying to update cr", "node", nodeName, "cr", klog.KObj(obj))
+		} else {
+			err := transformer.TransformFunc(logger, obj, nil, n.info)
+			if err != nil {
+				return err
+			}
+			cache.moveNodeInfoToHead(logger, nodeName)
+		}
+	}
+
 	return nil
 }
 

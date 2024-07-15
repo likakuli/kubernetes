@@ -25,6 +25,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -41,6 +42,7 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodename"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/nodeports"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/noderesources"
+	internalcache "k8s.io/kubernetes/pkg/scheduler/internal/cache"
 	"k8s.io/kubernetes/pkg/scheduler/internal/queue"
 	"k8s.io/kubernetes/pkg/scheduler/profile"
 	"k8s.io/kubernetes/pkg/scheduler/util/assumecache"
@@ -281,6 +283,63 @@ func (sched *Scheduler) deletePodFromCache(obj interface{}) {
 	sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(logger, queue.AssignedPodDelete, pod, nil, nil)
 }
 
+func (sched *Scheduler) addCRToCache(obj interface{}) {
+	logger := sched.logger
+	cr, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		logger.Error(nil, "Cannot convert to *unstructured.Unstructured", "obj", obj)
+		return
+	}
+
+	logger.V(3).Info("Add event for cr", "cr", klog.KObj(cr))
+	if err := sched.Cache.AddCR(logger, cr); err != nil {
+		logger.Error(err, "Scheduler cache AddCR failed", "cr", klog.KObj(cr))
+	}
+}
+
+func (sched *Scheduler) updateCRInCache(oldObj, newObj interface{}) {
+	logger := sched.logger
+	oldCR, ok := oldObj.(*unstructured.Unstructured)
+	if !ok {
+		logger.Error(nil, "Cannot convert oldObj to *unstructured.Unstructured", "oldObj", oldObj)
+		return
+	}
+	newCR, ok := newObj.(*unstructured.Unstructured)
+	if !ok {
+		logger.Error(nil, "Cannot convert newObj to *unstructured.Unstructured", "newObj", newObj)
+		return
+	}
+
+	logger.V(4).Info("Update event for cr", "cr", klog.KObj(oldCR))
+	if err := sched.Cache.UpdateCR(logger, oldCR, newCR); err != nil {
+		logger.Error(err, "Scheduler cache UpdateCR failed", "cr", klog.KObj(oldCR))
+	}
+}
+
+func (sched *Scheduler) deleteCRFromCache(obj interface{}) {
+	logger := sched.logger
+	var cr *unstructured.Unstructured
+	switch t := obj.(type) {
+	case *unstructured.Unstructured:
+		cr = t
+	case cache.DeletedFinalStateUnknown:
+		var ok bool
+		cr, ok = t.Obj.(*unstructured.Unstructured)
+		if !ok {
+			logger.Error(nil, "Cannot convert to *unstructured.Unstructured", "obj", t.Obj)
+			return
+		}
+	default:
+		logger.Error(nil, "Cannot convert to *unstructured.Unstructured", "obj", t)
+		return
+	}
+
+	logger.V(3).Info("Delete event for cr", "cr", klog.KObj(cr))
+	if err := sched.Cache.RemoveCR(logger, cr); err != nil {
+		logger.Error(err, "Scheduler cache RemoveCR failed", "cr", klog.KObj(cr))
+	}
+}
+
 // assignedPod selects pods that are assigned (scheduled and running).
 func assignedPod(pod *v1.Pod) bool {
 	return len(pod.Spec.NodeName) != 0
@@ -317,6 +376,7 @@ func addAllEventHandlers(
 	dynInformerFactory dynamicinformer.DynamicSharedInformerFactory,
 	resourceClaimCache *assumecache.AssumeCache,
 	gvkMap map[framework.GVK]framework.ActionType,
+	transformerMap internalcache.TransformerMap,
 ) error {
 	var (
 		handlerRegistration cache.ResourceEventHandlerRegistration
@@ -567,6 +627,42 @@ func addAllEventHandlers(
 			handlers = append(handlers, handlerRegistration)
 		}
 	}
+
+	if utilfeature.DefaultFeatureGate.Enabled(features.SchedulerCacheTransform) && dynInformerFactory != nil {
+		for gvk, transformers := range transformerMap {
+			switch gvk {
+			case framework.Pod:
+				// Do nothing
+			default:
+				if strings.Count(string(gvk), ".") < 2 {
+					logger.Error(nil, "incorrect event registration", "gvk", gvk)
+					continue
+				}
+				// Fall back to try dynamic informers.
+				gvr, _ := schema.ParseResourceArg(string(gvk))
+				dynInformer := dynInformerFactory.ForResource(*gvr).Informer()
+				for _, transformer := range transformers {
+					var handler cache.ResourceEventHandler
+					handler = cache.ResourceEventHandlerFuncs{
+						AddFunc:    sched.addCRToCache,
+						UpdateFunc: sched.updateCRInCache,
+						DeleteFunc: sched.deleteCRFromCache,
+					}
+					if transformer.FilterFunc != nil {
+						handler = cache.FilteringResourceEventHandler{
+							FilterFunc: transformer.FilterFunc,
+							Handler:    handler,
+						}
+					}
+					if handlerRegistration, err = dynInformer.AddEventHandler(handler); err != nil {
+						return err
+					}
+					handlers = append(handlers, handlerRegistration)
+				}
+			}
+		}
+	}
+
 	sched.registeredHandlers = handlers
 	return nil
 }
