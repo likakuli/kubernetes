@@ -32,6 +32,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/cache"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	corev1nodeaffinity "k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
@@ -629,18 +630,29 @@ func addAllEventHandlers(
 	}
 
 	if utilfeature.DefaultFeatureGate.Enabled(features.SchedulerCacheTransform) && dynInformerFactory != nil {
-		for gvk, transformers := range transformerMap {
-			switch gvk {
+		resources, err := restmapper.GetAPIGroupResources(sched.client.Discovery())
+		if err != nil {
+			return err
+		}
+		mapper := restmapper.NewDiscoveryRESTMapper(resources)
+
+		for gvkStr, transformers := range transformerMap {
+			switch gvkStr {
 			case framework.Pod:
 				// Do nothing
 			default:
-				if strings.Count(string(gvk), ".") < 2 {
-					logger.Error(nil, "incorrect event registration", "gvk", gvk)
+				if strings.Count(string(gvkStr), ".") < 2 {
+					klog.ErrorS(nil, "incorrect transformer registration", "gvk", gvkStr)
 					continue
 				}
 				// Fall back to try dynamic informers.
-				gvr, _ := schema.ParseResourceArg(string(gvk))
-				dynInformer := dynInformerFactory.ForResource(*gvr).Informer()
+				gvk, _ := schema.ParseKindArg(string(gvkStr))
+				mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+				if err != nil {
+					klog.ErrorS(err, "incorrect transformer registration", "gvk", gvkStr)
+					continue
+				}
+				dynInformer := dynInformerFactory.ForResource(mapping.Resource).Informer()
 				for _, transformer := range transformers {
 					var handler cache.ResourceEventHandler
 					handler = cache.ResourceEventHandlerFuncs{

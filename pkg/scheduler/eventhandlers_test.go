@@ -368,6 +368,7 @@ func TestAddAllEventHandlers(t *testing.T) {
 	tests := []struct {
 		name                   string
 		gvkMap                 map[framework.GVK]framework.ActionType
+		resources              []*metav1.APIResourceList
 		transformerMap         cache.TransformerMap
 		enableDRA              bool
 		expectStaticInformers  map[reflect.Type]bool
@@ -471,13 +472,38 @@ func TestAddAllEventHandlers(t *testing.T) {
 		{
 			name: "add transformer GVKs handlers defined in plugins dynamically",
 			transformerMap: map[framework.GVK][]framework.Transformer{
-				"daemonsets.v1.apps": []framework.Transformer{
+				"daemonset.v1.apps": []framework.Transformer{
 					emptyTransformer(),
 				},
-				"cronjobs.v1.batch": []framework.Transformer{
+				"cronjob.v1.batch": []framework.Transformer{
 					emptyTransformer(),
 				},
 			},
+			resources: []*metav1.APIResourceList{
+				&metav1.APIResourceList{
+					GroupVersion: "apps/v1",
+					APIResources: []metav1.APIResource{
+						metav1.APIResource{
+							Name:    "daemonsets",
+							Version: "v1",
+							Kind:    "DaemonSet",
+							Group:   "apps",
+						},
+					},
+				},
+				&metav1.APIResourceList{
+					GroupVersion: "batch/v1",
+					APIResources: []metav1.APIResource{
+						metav1.APIResource{
+							Name:    "cronjobs",
+							Version: "v1",
+							Kind:    "CronJob",
+							Group:   "batch",
+						},
+					},
+				},
+			},
+
 			expectStaticInformers: map[reflect.Type]bool{
 				reflect.TypeOf(&v1.Pod{}):       true,
 				reflect.TypeOf(&v1.Node{}):      true,
@@ -504,12 +530,15 @@ func TestAddAllEventHandlers(t *testing.T) {
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			informerFactory := informers.NewSharedInformerFactory(fake.NewSimpleClientset(), 0)
+			fakeClient := fake.NewSimpleClientset()
+			fakeClient.Resources = tt.resources
+			informerFactory := informers.NewSharedInformerFactory(fakeClient, 0)
 			schedulingQueue := queue.NewTestQueueWithInformerFactory(ctx, nil, informerFactory)
 			testSched := Scheduler{
 				StopEverything:  ctx.Done(),
 				SchedulingQueue: schedulingQueue,
 				logger:          logger,
+				client:          fakeClient,
 			}
 
 			dynclient := dyfake.NewSimpleDynamicClient(scheme)

@@ -19,11 +19,13 @@ package cache
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/util/feature"
@@ -510,61 +512,93 @@ func (cache *cacheImpl) removePod(logger klog.Logger, pod *v1.Pod) error {
 }
 
 func (cache *cacheImpl) AddCR(logger klog.Logger, obj *unstructured.Unstructured) error {
-	for _, transformer := range cache.transformers[framework.GVK(obj.GetObjectKind().GroupVersionKind().String())] {
-		nodeName := transformer.NodeNameFn(obj)
-		n, ok := cache.nodes[nodeName]
-		if !ok {
-			n = newNodeInfoListItem(framework.NewNodeInfo())
-			cache.nodes[nodeName] = n
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	for _, gvk := range getGVKs(obj.GetObjectKind().GroupVersionKind()) {
+		for _, transformer := range cache.transformers[gvk] {
+			nodeName := transformer.NodeNameFn(obj)
+			n, ok := cache.nodes[nodeName]
+			if !ok {
+				n = newNodeInfoListItem(framework.NewNodeInfo())
+				cache.nodes[nodeName] = n
+			}
+			count, ok := n.info.ScalaData[string(gvk)]
+			if !ok {
+				n.info.ScalaData[string(gvk)] = 1
+			} else {
+				n.info.ScalaData[string(gvk)] = count.(int) + 1
+			}
+			err := transformer.TransformFunc(logger, nil, obj, n.info)
+			if err != nil {
+				return err
+			}
+			cache.moveNodeInfoToHead(logger, nodeName)
 		}
-		err := transformer.TransformFunc(logger, nil, obj, n.info)
-		if err != nil {
-			return err
-		}
-		cache.moveNodeInfoToHead(logger, nodeName)
 	}
 
 	return nil
 }
 
 func (cache *cacheImpl) UpdateCR(logger klog.Logger, oldObj, newObj *unstructured.Unstructured) error {
-	for _, transformer := range cache.transformers[framework.GVK(newObj.GetObjectKind().GroupVersionKind().String())] {
-		if transformer.UpdateHintFunc == nil || transformer.UpdateHintFunc != nil && transformer.UpdateHintFunc(oldObj, newObj) {
-			newNodeName := transformer.NodeNameFn(newObj)
-			oldNodeName := transformer.NodeNameFn(oldObj)
-			if oldNodeName == newNodeName {
-				n, ok := cache.nodes[newNodeName]
-				if !ok {
-					logger.Error(nil, "Node not found when trying to update cr", "node", newNodeName, "cr", klog.KObj(newObj))
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	for _, gvk := range getGVKs(newObj.GetObjectKind().GroupVersionKind()) {
+		for _, transformer := range cache.transformers[gvk] {
+			if transformer.UpdateHintFunc == nil || transformer.UpdateHintFunc != nil && transformer.UpdateHintFunc(oldObj, newObj) {
+				newNodeName := transformer.NodeNameFn(newObj)
+				oldNodeName := transformer.NodeNameFn(oldObj)
+				if oldNodeName == newNodeName {
+					n, ok := cache.nodes[newNodeName]
+					if !ok {
+						logger.Error(nil, "Node not found when trying to update cr", "node", newNodeName, "cr", klog.KObj(newObj))
+					} else {
+						err := transformer.TransformFunc(logger, oldObj, newObj, n.info)
+						if err != nil {
+							return err
+						}
+						cache.moveNodeInfoToHead(logger, newNodeName)
+					}
 				} else {
-					err := transformer.TransformFunc(logger, oldObj, newObj, n.info)
+					n, ok := cache.nodes[oldNodeName]
+					if !ok {
+						logger.Error(nil, "Node not found when trying to update cr", "node", oldNodeName, "cr", klog.KObj(oldObj))
+					} else {
+						count, ok := n.info.ScalaData[string(gvk)]
+						if !ok {
+							logger.Error(nil, "CRs for specified node not found when trying yo update cr", "node", oldNodeName, "cr", klog.KObj(oldObj))
+						} else {
+							n.info.ScalaData[string(gvk)] = count.(int) - 1
+						}
+						err := transformer.TransformFunc(logger, oldObj, nil, n.info)
+						if err != nil {
+							return err
+						}
+						if count != nil && count.(int) == 1 && len(n.info.Pods) == 0 && n.info.Node() == nil {
+							cache.removeNodeInfoFromList(logger, oldNodeName)
+						} else {
+							cache.moveNodeInfoToHead(logger, oldNodeName)
+						}
+					}
+
+					n, ok = cache.nodes[newNodeName]
+					if !ok {
+						n = newNodeInfoListItem(framework.NewNodeInfo())
+						cache.nodes[newNodeName] = n
+					}
+					count, ok := n.info.ScalaData[string(gvk)]
+					if !ok {
+						n.info.ScalaData[string(gvk)] = 1
+					} else {
+						n.info.ScalaData[string(gvk)] = count.(int) + 1
+					}
+					err := transformer.TransformFunc(logger, nil, newObj, n.info)
 					if err != nil {
 						return err
 					}
 					cache.moveNodeInfoToHead(logger, newNodeName)
 				}
-			} else {
-				n, ok := cache.nodes[oldNodeName]
-				if !ok {
-					logger.Error(nil, "Node not found when trying to update cr", "node", oldNodeName, "cr", klog.KObj(oldObj))
-				} else {
-					err := transformer.TransformFunc(logger, oldObj, nil, n.info)
-					if err != nil {
-						return err
-					}
-					cache.moveNodeInfoToHead(logger, oldNodeName)
-				}
-
-				n, ok = cache.nodes[newNodeName]
-				if !ok {
-					n = newNodeInfoListItem(framework.NewNodeInfo())
-					cache.nodes[newNodeName] = n
-				}
-				err := transformer.TransformFunc(logger, nil, newObj, n.info)
-				if err != nil {
-					return err
-				}
-				cache.moveNodeInfoToHead(logger, newNodeName)
 			}
 		}
 	}
@@ -573,17 +607,32 @@ func (cache *cacheImpl) UpdateCR(logger klog.Logger, oldObj, newObj *unstructure
 }
 
 func (cache *cacheImpl) RemoveCR(logger klog.Logger, obj *unstructured.Unstructured) error {
-	for _, transformer := range cache.transformers[framework.GVK(obj.GetObjectKind().GroupVersionKind().String())] {
-		nodeName := transformer.NodeNameFn(obj)
-		n, ok := cache.nodes[nodeName]
-		if !ok {
-			logger.Error(nil, "Node not found when trying to update cr", "node", nodeName, "cr", klog.KObj(obj))
-		} else {
-			err := transformer.TransformFunc(logger, obj, nil, n.info)
-			if err != nil {
-				return err
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	for _, gvk := range getGVKs(obj.GetObjectKind().GroupVersionKind()) {
+		for _, transformer := range cache.transformers[gvk] {
+			nodeName := transformer.NodeNameFn(obj)
+			n, ok := cache.nodes[nodeName]
+			if !ok {
+				logger.Error(nil, "Node not found when trying to remove cr", "node", nodeName, "cr", klog.KObj(obj))
+			} else {
+				count, ok := n.info.ScalaData[string(gvk)]
+				if !ok {
+					logger.Error(nil, "CRs for specified node not found when trying yo remove cr", "node", nodeName, "cr", klog.KObj(obj))
+				} else {
+					n.info.ScalaData[string(gvk)] = count.(int) - 1
+				}
+				err := transformer.TransformFunc(logger, obj, nil, n.info)
+				if err != nil {
+					return err
+				}
+				if count != nil && count.(int) == 1 && len(n.info.Pods) == 0 && n.info.Node() == nil {
+					cache.removeNodeInfoFromList(logger, nodeName)
+				} else {
+					cache.moveNodeInfoToHead(logger, nodeName)
+				}
 			}
-			cache.moveNodeInfoToHead(logger, nodeName)
 		}
 	}
 
@@ -865,4 +914,11 @@ func (cache *cacheImpl) updateMetrics() {
 	metrics.CacheSize.WithLabelValues("assumed_pods").Set(float64(len(cache.assumedPods)))
 	metrics.CacheSize.WithLabelValues("pods").Set(float64(len(cache.podStates)))
 	metrics.CacheSize.WithLabelValues("nodes").Set(float64(len(cache.nodes)))
+}
+
+func getGVKs(gvk schema.GroupVersionKind) []framework.GVK {
+	return []framework.GVK{
+		framework.GVK(fmt.Sprintf("%s.%s.%s", gvk.Kind, gvk.Version, gvk.Group)),
+		framework.GVK(fmt.Sprintf("%s.%s.%s", strings.ToLower(gvk.Kind), gvk.Version, gvk.Group)),
+	}
 }
