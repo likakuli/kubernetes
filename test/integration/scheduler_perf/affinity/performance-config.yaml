@@ -257,7 +257,7 @@
   - name: 5000Nodes_5000Pods
     featureGates:
       SchedulerQueueingHints: false
-    labels: [performance]
+    labels: [performance, kk]
     threshold: 90
     params:
       initNodes: 5000
