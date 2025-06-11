@@ -22,9 +22,10 @@ import (
 	"math"
 	"sync/atomic"
 
+	"k8s.io/klog/v2"
+
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
@@ -51,10 +52,12 @@ func (s *preScoreState) Clone() fwk.StateData {
 func (m scoreMap) processTerm(term *framework.AffinityTerm, weight int32, pod *v1.Pod, nsLabels labels.Set, node *v1.Node, multiplier int32) {
 	if term.Matches(pod, nsLabels) {
 		if tpValue, tpValueExist := node.Labels[term.TopologyKey]; tpValueExist {
-			if m[term.TopologyKey] == nil {
-				m[term.TopologyKey] = make(map[string]int64)
+			valueMap := m[term.TopologyKey]
+			if valueMap == nil {
+				valueMap = make(map[string]int64)
+				m[term.TopologyKey] = valueMap
 			}
-			m[term.TopologyKey][tpValue] += int64(weight * multiplier)
+			valueMap[tpValue] += int64(weight * multiplier)
 		}
 	}
 }
