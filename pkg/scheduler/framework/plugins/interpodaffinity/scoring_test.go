@@ -18,6 +18,7 @@ package interpodaffinity
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -987,5 +988,57 @@ func TestPreferredAffinityWithHardPodAffinitySymmetricWeight(t *testing.T) {
 				t.Errorf("unexpected NodeScoreList (-want,+got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func BenchmarkPreScore_NilNamespaceSelector(b *testing.B) {
+	podLabelSecurityS1 := map[string]string{
+		"security": "S1",
+	}
+	antiAffinityNamespaceSelector := &v1.Affinity{
+		PodAntiAffinity: &v1.PodAntiAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []v1.WeightedPodAffinityTerm{
+				{
+					Weight: 5,
+					PodAffinityTerm: v1.PodAffinityTerm{
+						LabelSelector: &metav1.LabelSelector{
+							MatchExpressions: []metav1.LabelSelectorRequirement{
+								{
+									Key:      "security",
+									Operator: metav1.LabelSelectorOpIn,
+									Values:   []string{"S1"},
+								},
+							},
+						},
+						TopologyKey: "kubernetes.io/hostname",
+					},
+				},
+			},
+		},
+	}
+	pod := &v1.Pod{Spec: v1.PodSpec{NodeName: "", Affinity: antiAffinityNamespaceSelector}, ObjectMeta: metav1.ObjectMeta{Namespace: "subteam1.team1", Labels: podLabelSecurityS1}}
+	var (
+		pods  []*v1.Pod
+		nodes []*v1.Node
+	)
+
+	for i := 0; i < 5000; i++ {
+		node := "node" + strconv.Itoa(i)
+		for j := 0; j < 20; j++ {
+			pods = append(pods, &v1.Pod{Spec: v1.PodSpec{NodeName: node, Affinity: antiAffinityNamespaceSelector}, ObjectMeta: metav1.ObjectMeta{Namespace: "subteam1.team1", Labels: podLabelSecurityS1}})
+		}
+		nodes = append(nodes, &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: node, Labels: map[string]string{"kubernetes.io/hostname": node}}})
+	}
+
+	_, ctx := ktesting.NewTestContext(b)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	state := framework.NewCycleState()
+	p := plugintesting.SetupPluginWithInformers(ctx, b, schedruntime.FactoryAdapter(feature.Features{}, New), &config.InterPodAffinityArgs{HardPodAffinityWeight: 1}, cache.NewSnapshot(pods, nodes), namespaces)
+	nodeInfos := tf.BuildNodeInfos(nodes)
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		p.(framework.PreScorePlugin).PreScore(ctx, state, pod, nodeInfos)
 	}
 }

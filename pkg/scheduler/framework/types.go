@@ -539,11 +539,14 @@ type AffinityTerm struct {
 	Selector          labels.Selector
 	TopologyKey       string
 	NamespaceSelector labels.Selector
+	FastPathNS        string
 }
 
 // Matches returns true if the pod matches the label selector and namespaces or namespace selector.
 func (at *AffinityTerm) Matches(pod *v1.Pod, nsLabels labels.Set) bool {
-	if at.Namespaces.Has(pod.Namespace) || at.NamespaceSelector.Matches(nsLabels) {
+	// Add two fast paths: labels.Everything() and fastPathNS equals the given pod's namespace.
+	if at.NamespaceSelector.Empty() || at.FastPathNS == pod.Namespace ||
+		at.Namespaces.Has(pod.Namespace) || at.NamespaceSelector.Matches(nsLabels) {
 		return at.Selector.Matches(labels.Set(pod.Labels))
 	}
 	return false
@@ -665,13 +668,13 @@ func newAffinityTerm(pod *v1.Pod, term *v1.PodAffinityTerm) (*AffinityTerm, erro
 		return nil, err
 	}
 
-	namespaces := getNamespacesFromPodAffinityTerm(pod, term)
+	namespaces, fastPathNS := getNamespacesFromPodAffinityTerm(pod, term)
 	nsSelector, err := metav1.LabelSelectorAsSelector(term.NamespaceSelector)
 	if err != nil {
 		return nil, err
 	}
 
-	return &AffinityTerm{Namespaces: namespaces, Selector: selector, TopologyKey: term.TopologyKey, NamespaceSelector: nsSelector}, nil
+	return &AffinityTerm{Namespaces: namespaces, Selector: selector, TopologyKey: term.TopologyKey, NamespaceSelector: nsSelector, FastPathNS: fastPathNS}, nil
 }
 
 // GetAffinityTerms receives a Pod and affinity terms and returns the namespaces and
@@ -746,14 +749,21 @@ func GetPodAntiAffinityTerms(affinity *v1.Affinity) (terms []v1.PodAffinityTerm)
 
 // returns a set of names according to the namespaces indicated in podAffinityTerm.
 // If namespaces is empty it considers the given pod's namespace.
-func getNamespacesFromPodAffinityTerm(pod *v1.Pod, podAffinityTerm *v1.PodAffinityTerm) sets.Set[string] {
-	names := sets.Set[string]{}
+func getNamespacesFromPodAffinityTerm(pod *v1.Pod, podAffinityTerm *v1.PodAffinityTerm) (sets.Set[string], string) {
+	var (
+		names        = sets.Set[string]{}
+		fastPathName = ""
+	)
 	if len(podAffinityTerm.Namespaces) == 0 && podAffinityTerm.NamespaceSelector == nil {
 		names.Insert(pod.Namespace)
+		fastPathName = pod.Namespace
 	} else {
 		names.Insert(podAffinityTerm.Namespaces...)
+		if len(podAffinityTerm.Namespaces) > 0 {
+			fastPathName = podAffinityTerm.Namespaces[0]
+		}
 	}
-	return names
+	return names, fastPathName
 }
 
 // ImageStateSummary provides summarized information about the state of an image.

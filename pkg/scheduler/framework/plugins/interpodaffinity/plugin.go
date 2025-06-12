@@ -121,7 +121,7 @@ func getArgs(obj runtime.Object) (config.InterPodAffinityArgs, error) {
 // there when matching against this term, there is no need to lookup the existing
 // pod's namespace labels to match them against term's namespaceSelector explicitly.
 func (pl *InterPodAffinity) mergeAffinityTermNamespacesIfNotEmpty(at *framework.AffinityTerm) error {
-	if at.NamespaceSelector.Empty() {
+	if at.NamespaceSelector.Empty() || at.NamespaceSelector == labels.Nothing() {
 		return nil
 	}
 	ns, err := pl.nsLister.List(at.NamespaceSelector)
